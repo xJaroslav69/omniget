@@ -7,8 +7,8 @@
 <h3 align="center">在一个应用里下载 Udemy 课程、YouTube 和 1800+ 网站。无需命令行。</h3>
 
 <p align="center">
-<b>English</b>
-| <a href="README_zh_CN.md">中文</a>
+<a href="README.md">English</a>
+| <b>中文</b>
 | <a href="README.ru.md">Русский</a>
 </p>
 
