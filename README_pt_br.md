@@ -15,9 +15,9 @@ leitor pdf, flashcards anki, repetição espaçada, player de música, spicetify
 <h1 align="center">OmniGet</h1>
 
 <p align="center">
-  <a href="README.en.md">English</a>
+  <a href="README.md">English</a>
   · <b>Português (BR)</b>
-  · <a href="README.md">Русский</a>
+  · <a href="README.ru.md">Русский</a>
   · <a href="README_zh_CN.md">简体中文</a>
 </p>
 
