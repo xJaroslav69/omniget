@@ -29,7 +29,7 @@ mcp-server, ollama, local-llm
 <h1 align="center">OmniGet</h1>
 
 <p align="center">
-  <a href="README.md">English</a>
+  <a href="README.en.md">English</a>
   · <a href="README_pt_br.md">Português (BR)</a>
   · <b>Русский</b>
   · <a href="README_zh_CN.md">简体中文</a>
