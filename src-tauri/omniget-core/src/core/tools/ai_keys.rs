@@ -185,6 +185,49 @@ impl Kind {
     }
 }
 
+/// A provider row as the settings form reads it: the table's own fields plus the two
+/// capabilities that are derived rather than stored.
+///
+/// `needs_key` and `base_url_editable` are methods, so serialising a `Kind` never carried
+/// them: the form asked for both, got nothing for both, and drew neither the key field nor
+/// the endpoint field for any provider. This is the payload that does carry them, and it
+/// is built from the rows themselves so a provider added later cannot be missing from it.
+#[derive(Debug, Clone, Serialize)]
+pub struct KindView {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub base_url: &'static str,
+    pub balance: bool,
+    pub env: &'static str,
+    pub wire: &'static str,
+    pub streaming: bool,
+    pub tools: bool,
+    pub needs_key: bool,
+    pub base_url_editable: bool,
+}
+
+impl KindView {
+    pub fn of(kind: &Kind) -> Self {
+        Self {
+            id: kind.id,
+            name: kind.name,
+            base_url: kind.base_url,
+            balance: kind.balance,
+            env: kind.env,
+            wire: kind.wire,
+            streaming: kind.streaming,
+            tools: kind.tools,
+            needs_key: kind.needs_key(),
+            base_url_editable: kind.base_url_editable(),
+        }
+    }
+}
+
+/// Every row, in the shape the settings form reads it.
+pub fn kinds_view() -> Vec<KindView> {
+    KINDS.iter().map(KindView::of).collect()
+}
+
 pub const KINDS: &[Kind] = &[
     Kind {
         id: "openai",
@@ -1006,6 +1049,40 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::{MutexGuard, OnceLock};
+
+    /// The settings form decides whether to draw the key field and the endpoint field from
+    /// these two flags, and both are derived methods rather than fields: the payload has to
+    /// carry them explicitly, which is exactly what serialising a `Kind` does not do.
+    #[test]
+    fn the_kind_payload_carries_the_form_flags() {
+        let json = serde_json::to_value(kinds_view()).unwrap();
+        let rows = json.as_array().unwrap();
+        assert_eq!(rows.len(), KINDS.len());
+
+        let row = |id: &str| {
+            rows.iter()
+                .find(|r| r["id"] == id)
+                .unwrap_or_else(|| panic!("no row for {id}"))
+        };
+
+        // a provider behind a real endpoint takes a key, and its URL is not the user's to type
+        assert_eq!(row("deepseek")["needs_key"], true);
+        assert_eq!(row("deepseek")["base_url_editable"], false);
+
+        // a local server answers without one, and its URL is the user's to give
+        assert_eq!(row("ollama")["needs_key"], false);
+        assert_eq!(row("ollama")["base_url_editable"], true);
+
+        // a relay is deployed per site, so its table URL is a placeholder until replaced
+        assert_eq!(row("newapi")["needs_key"], true);
+        assert_eq!(row("newapi")["base_url_editable"], true);
+
+        // and no row may be missing either flag, which is what the form reads
+        for r in rows {
+            assert!(r.get("needs_key").is_some(), "{r}");
+            assert!(r.get("base_url_editable").is_some(), "{r}");
+        }
+    }
 
     #[test]
     fn hints() {

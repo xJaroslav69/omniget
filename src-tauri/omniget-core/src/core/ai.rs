@@ -82,15 +82,18 @@ impl AiConfig {
         }
     }
 
-    /// Whether the kind this config records takes a credential. An unknown or empty
-    /// kind is treated as taking one, because refusing to call a configuration
-    /// "configured" is the safer failure for a request that would go out unauthenticated.
+    /// Whether the kind this config records takes a credential.
+    ///
+    /// A config from before the expansion records no kind, and the only thing the old
+    /// three-value form could set for a local endpoint was the endpoint itself — so the
+    /// endpoint stays the whole requirement there, which is what keeps an existing Ollama
+    /// or LM Studio setup configured. An id the table does not carry is the opposite case:
+    /// no endpoint rule is known for it, so it is not called configured on a guess.
     fn kind_needs_key(&self) -> bool {
-        if self.kind.is_empty() {
-            return true;
+        match crate::core::tools::ai_keys::find_kind(&self.kind) {
+            Some(kind) => kind.needs_key(),
+            None => !self.kind.is_empty(),
         }
-
-        crate::core::tools::ai_keys::kind_of(&self.kind).needs_key()
     }
 }
 
@@ -243,13 +246,22 @@ pub enum KeyAction<'a> {
 /// when the form leaves it out, which is what makes `deepseek`, `groq`, `xai`,
 /// `mistral` and the like reachable without retyping their endpoints.
 pub fn set_with_kind(kind: &str, model: String, base_url: String, key: KeyAction<'_>) -> AiConfig {
-    let provider = provider_for_kind(kind);
     let mut guard = store().lock().unwrap();
-    guard.provider = provider;
-    guard.kind = kind.trim().to_string();
-    guard.key_id = String::new();
-    guard.model = model.trim().to_string();
-    guard.local_base_url = if !base_url.trim().is_empty() {
+    apply_kind(&mut guard, kind, model, base_url, key);
+    write_to_disk(&guard);
+    guard.clone()
+}
+
+/// The mutation [`set_with_kind`] applies, without the store or the disk around it. This is
+/// the part that holds the credential rule, so a test can exercise it on a config it owns
+/// instead of on the process-wide one.
+fn apply_kind(cfg: &mut AiConfig, kind: &str, model: String, base_url: String, key: KeyAction<'_>) {
+    let provider = provider_for_kind(kind);
+    cfg.provider = provider;
+    cfg.kind = kind.trim().to_string();
+    cfg.key_id = String::new();
+    cfg.model = model.trim().to_string();
+    cfg.local_base_url = if !base_url.trim().is_empty() {
         base_url.trim().trim_end_matches('/').to_string()
     } else if provider == AiProvider::Local {
         crate::core::tools::ai_keys::app_base_url(kind, "")
@@ -260,16 +272,14 @@ pub fn set_with_kind(kind: &str, model: String, base_url: String, key: KeyAction
     match key {
         KeyAction::Keep => {}
         KeyAction::Set(k) => match provider {
-            AiProvider::Anthropic => guard.anthropic_key = k.trim().to_string(),
-            _ => guard.openai_key = k.trim().to_string(),
+            AiProvider::Anthropic => cfg.anthropic_key = k.trim().to_string(),
+            _ => cfg.openai_key = k.trim().to_string(),
         },
         KeyAction::Clear => {
-            guard.openai_key.clear();
-            guard.anthropic_key.clear();
+            cfg.openai_key.clear();
+            cfg.anthropic_key.clear();
         }
     }
-    write_to_disk(&guard);
-    guard.clone()
 }
 
 /// Turn AI off. Clearing `kind` is part of that: `view()` hands the kind to the
@@ -742,10 +752,12 @@ mod tests {
 
     /// A blank key field means "keep", but switching providers means "do not carry the
     /// other provider's credential over". Both used to arrive as `None`, so the first
-    /// provider's key was sent to the second one's endpoint as a bearer token.
+    /// provider's key was sent to the second one's endpoint as a bearer token. This goes
+    /// through the mutation the command calls, on a config the test owns, rather than
+    /// asserting on a `KeyAction` built here.
     #[test]
     fn switching_provider_can_drop_the_previous_credential() {
-        let cfg = AiConfig {
+        let mut cfg = AiConfig {
             provider: provider_for_kind("deepseek"),
             kind: "deepseek".to_string(),
             local_base_url: crate::core::tools::ai_keys::app_base_url("deepseek", ""),
@@ -756,24 +768,103 @@ mod tests {
         // settings form checks before offering the summarize controls
         assert!(cfg.is_configured());
 
-        // and a local server without a key still is
-        let ollama = AiConfig {
-            provider: provider_for_kind("ollama"),
-            kind: "ollama".to_string(),
-            local_base_url: crate::core::tools::ai_keys::app_base_url("ollama", ""),
+        // the switch: another provider, no key typed. The stored credential must not follow.
+        apply_kind(
+            &mut cfg,
+            "ollama",
+            String::new(),
+            String::new(),
+            KeyAction::Clear,
+        );
+        assert!(
+            cfg.openai_key.is_empty(),
+            "the previous provider's credential must not travel"
+        );
+        assert!(cfg.anthropic_key.is_empty());
+        assert_eq!(cfg.provider_id(), "ollama");
+        assert_eq!(cfg.local_base_url, "http://localhost:11434/v1");
+        assert!(cfg.is_configured(), "a local server answers without a key");
+
+        // a key typed for the new provider lands in the slot that provider's wire reads
+        apply_kind(
+            &mut cfg,
+            "deepseek",
+            "deepseek-chat".into(),
+            String::new(),
+            KeyAction::Set("sk-deepseek"),
+        );
+        assert_eq!(cfg.openai_key, "sk-deepseek");
+        assert_eq!(cfg.model, "deepseek-chat");
+        assert_eq!(cfg.local_base_url, "https://api.deepseek.com");
+        assert!(cfg.is_configured());
+
+        // a blank field on the same provider means keep
+        apply_kind(
+            &mut cfg,
+            "deepseek",
+            "deepseek-reasoner".into(),
+            String::new(),
+            KeyAction::Keep,
+        );
+        assert_eq!(cfg.openai_key, "sk-deepseek");
+
+        // the anthropic wire has its own slot, and the endpoint stays empty so it is not
+        // mistaken for a local URL
+        apply_kind(
+            &mut cfg,
+            "anthropic",
+            "claude-sonnet-4-5".into(),
+            String::new(),
+            KeyAction::Set("sk-ant"),
+        );
+        assert_eq!(cfg.provider, AiProvider::Anthropic);
+        assert_eq!(cfg.anthropic_key, "sk-ant");
+        assert!(cfg.local_base_url.is_empty());
+        assert!(cfg.is_configured());
+
+        // and clearing drops whichever slot the provider was using
+        apply_kind(
+            &mut cfg,
+            "openai",
+            "gpt-4o-mini".into(),
+            String::new(),
+            KeyAction::Clear,
+        );
+        assert!(cfg.openai_key.is_empty() && cfg.anthropic_key.is_empty());
+        assert!(!cfg.is_configured());
+    }
+
+    /// A config written by the three-value form records no kind, and the only thing that
+    /// form could set for a local endpoint was the endpoint: requiring a key there is what
+    /// turned an existing Ollama or LM Studio setup into "not configured" once it was read.
+    #[test]
+    fn a_kindless_local_config_still_counts_as_configured() {
+        let legacy = AiConfig {
+            provider: AiProvider::Local,
+            kind: String::new(),
+            local_base_url: "http://localhost:11434/v1".to_string(),
             ..Default::default()
         };
-        assert!(ollama.is_configured(), "a local server answers without a key");
+        assert!(legacy.is_configured());
 
-        // the two actions a form can ask for, in the shape the command builds them
-        match KeyAction::Set("sk-xai") {
-            KeyAction::Set(k) => assert_eq!(k, "sk-xai"),
-            _ => panic!("Set must carry the credential"),
-        }
-        match KeyAction::Clear {
-            KeyAction::Clear => {}
-            _ => panic!("Clear must not carry one"),
-        }
+        // a row that does take a credential is not configured without one
+        let keyed = AiConfig {
+            kind: "deepseek".to_string(),
+            ..legacy.clone()
+        };
+        assert!(!keyed.is_configured());
+        let keyed = AiConfig {
+            openai_key: "sk-deepseek".to_string(),
+            ..keyed
+        };
+        assert!(keyed.is_configured());
+
+        // and an id the table does not carry is not called configured on a guess
+        let unknown = AiConfig {
+            kind: "deepsek".to_string(),
+            ..legacy
+        };
+        assert!(!unknown.is_configured());
     }
 
     /// Turning AI off has to drop the recorded kind, or the next read of the config
