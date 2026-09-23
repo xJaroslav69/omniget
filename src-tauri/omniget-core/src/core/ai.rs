@@ -103,7 +103,20 @@ fn store() -> &'static Mutex<AiConfig> {
     STORE.get_or_init(|| Mutex::new(load_from_disk()))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Where a test wants the config file written. The store is process-wide, so a test that
+    /// drives `set_with_kind`/`clear` for real points this at a temp dir instead of the app's,
+    /// which the process-wide `OMNIGET_DATA_DIR` would not do without racing the other tests.
+    static TEST_DIR: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn file_path() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = TEST_DIR.with(|d| d.borrow().clone()) {
+        return Some(dir.join(AI_CONFIG_FILE));
+    }
     crate::core::paths::app_data_dir().map(|d| d.join(AI_CONFIG_FILE))
 }
 
@@ -880,6 +893,53 @@ mod tests {
 
         assert_eq!(cfg.provider_id(), "");
         assert!(!cfg.is_configured());
+    }
+
+    /// The credential rule through the functions the command calls, and not only on a literal
+    /// the test built: `set_with_kind` and `clear` run for real here, store and disk included,
+    /// with the config file pointed at a temp dir so the process-wide store is written without
+    /// touching the config of whoever runs the tests.
+    #[test]
+    fn the_store_keeps_the_credential_where_it_belongs() {
+        let dir = std::env::temp_dir().join(format!("omniget-ai-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        TEST_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+
+        // a key typed for a provider that takes one: the endpoint comes from the table
+        let cfg = set_with_kind(
+            "deepseek",
+            "deepseek-chat".to_string(),
+            String::new(),
+            KeyAction::Set("sk-deepseek"),
+        );
+        assert_eq!(cfg.provider_id(), "deepseek");
+        assert_eq!(cfg.local_base_url, "https://api.deepseek.com");
+        assert!(cfg.is_configured());
+
+        // the form's switch: another provider, blank field. The stored credential must not follow.
+        let cfg = set_with_kind("ollama", String::new(), String::new(), KeyAction::Clear);
+        assert!(
+            cfg.openai_key.is_empty(),
+            "the previous provider's credential must not travel"
+        );
+        assert!(cfg.anthropic_key.is_empty());
+        assert_eq!(cfg.provider_id(), "ollama");
+        assert!(cfg.is_configured(), "a local server answers without a key");
+
+        // and Off drops the kind the form reads back
+        let cfg = clear();
+        assert_eq!(cfg.provider_id(), "");
+        assert!(!cfg.is_configured());
+
+        // the file the store wrote is the temp one, and it carries no secret and no stale kind
+        let text = std::fs::read_to_string(dir.join(AI_CONFIG_FILE)).expect("config written");
+        assert!(!text.contains("sk-deepseek"), "{text}");
+        assert!(text.contains("\"provider\": \"none\""), "{text}");
+        assert!(text.contains("\"kind\": \"\""), "{text}");
+
+        TEST_DIR.with(|d| *d.borrow_mut() = None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The capability flags the settings form reads come from the table row, so a
