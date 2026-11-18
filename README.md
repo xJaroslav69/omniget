@@ -2,7 +2,9 @@
 
 <p align="center">
   <b>English</b>
+  · <a href="README.pt-BR.md">Português (Brasil)</a>
   · <a href="README.ru.md">Русский</a>
+  · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">
